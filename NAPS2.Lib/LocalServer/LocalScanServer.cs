@@ -12,6 +12,7 @@ using NAPS2.Platform;
 using NAPS2.Platform.Windows;
 using NAPS2.Config;
 using NAPS2.ImportExport;
+using NAPS2.Scan.Batch;
 using System.Threading;
 
 namespace NAPS2.LocalServer;
@@ -27,18 +28,24 @@ public class LocalScanServer : IDisposable
     private bool _scanInProgress;
     private CancellationTokenSource _cts = new();
     private readonly IProfileManager _profileManager;
+    private readonly IDesktopSubFormController _desktopSubFormController;
+    private readonly Naps2Config _config;
 
     public LocalScanServer(DesktopFormProvider desktopFormProvider,
         IDesktopScanController desktopScanController,
         UiImageList imageList,
         ScanningContext scanningContext,
-        IProfileManager profileManager)
+        IProfileManager profileManager,
+        IDesktopSubFormController desktopSubFormController,
+        Naps2Config config)
     {
         _desktopFormProvider = desktopFormProvider;
         _desktopScanController = desktopScanController;
         _imageList = imageList;
         _scanningContext = scanningContext;
         _profileManager = profileManager;
+        _desktopSubFormController = desktopSubFormController;
+        _config = config;
 
         // Bind only to loopback for local-only access
         _listener.Prefixes.Add("http://127.0.0.1:8765/");
@@ -80,7 +87,8 @@ public class LocalScanServer : IDisposable
 
             // Normalize path
             var path = req.Url?.AbsolutePath?.TrimEnd('/') ?? string.Empty;
-            if (!string.Equals(path, "/scan", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(path, "/scan", StringComparison.OrdinalIgnoreCase) &&
+                !string.Equals(path, "/batch-scan", StringComparison.OrdinalIgnoreCase))
             {
                 res.StatusCode = 404;
                 res.Close();
@@ -118,25 +126,28 @@ public class LocalScanServer : IDisposable
                     }
                 });
 
-                // Run the scan on the UI thread and capture newly scanned images as cloned ProcessedImage objects
-                var scanTcs = new TaskCompletionSource<List<ProcessedImage>>();
-                Invoker.Current.InvokeDispatch(async () =>
+                List<(string fileName, MemoryStream stream)> pdfStreams;
+                if (string.Equals(path, "/scan", StringComparison.OrdinalIgnoreCase))
                 {
-                    try
+                    // Single scan: Run via ScanDefault and capture newly added images
+                    var scanTcs = new TaskCompletionSource<List<ProcessedImage>>();
+                    Invoker.Current.InvokeDispatch(async () =>
                     {
-                        int startCount = _imageList.Images.Count;
-                        await _desktopScanController.ScanDefault();
-                        var newUiImages = _imageList.Images.Skip(startCount).ToList();
-                        var clones = newUiImages.Select(i => i.GetClonedImage()).ToList();
-                        scanTcs.TrySetResult(clones);
-                    }
-                    catch (Exception ex)
-                    {
-                        scanTcs.TrySetException(ex);
-                    }
-                });
+                        try
+                        {
+                            int startCount = _imageList.Images.Count;
+                            await _desktopScanController.ScanDefault();
+                            var newUiImages = _imageList.Images.Skip(startCount).ToList();
+                            var clones = newUiImages.Select(i => i.GetClonedImage()).ToList();
+                            scanTcs.TrySetResult(clones);
+                        }
+                        catch (Exception ex)
+                        {
+                            scanTcs.TrySetException(ex);
+                        }
+                    });
 
-                var clonedImages = await scanTcs.Task.ConfigureAwait(false);
+                    var clonedImages = await scanTcs.Task.ConfigureAwait(false);
 
                 if (clonedImages.Count == 0)
                 {
@@ -145,7 +156,7 @@ public class LocalScanServer : IDisposable
                     return;
                 }
 
-                // Determine grouping based on selected profile's AutoSave separator (per page/scan), default single file
+                    // Determine grouping based on selected profile's AutoSave separator (per page/scan), default single file
                 var sep = SaveSeparator.None;
                 var selProfile = _profileManager.DefaultProfile;
                 if (selProfile?.EnableAutoSave == true && selProfile.AutoSaveSettings != null)
@@ -153,14 +164,14 @@ public class LocalScanServer : IDisposable
                     sep = selProfile.AutoSaveSettings.Separator;
                 }
 
-                var groups = SaveSeparatorHelper.SeparateScans(new[] { clonedImages }, sep).ToList();
+                    var groups = SaveSeparatorHelper.SeparateScans(new[] { clonedImages }, sep).ToList();
 
-                // Export groups to PDFs
+                    // Export groups to PDFs
                 var exporter = new PdfExporter(_scanningContext);
-                var pdfStreams = new List<(string fileName, MemoryStream stream)>();
+                    pdfStreams = new List<(string fileName, MemoryStream stream)>();
                 try
                 {
-                    for (int i = 0; i < groups.Count; i++)
+                        for (int i = 0; i < groups.Count; i++)
                     {
                         var group = groups[i];
                         var ms = new MemoryStream();
@@ -173,7 +184,7 @@ public class LocalScanServer : IDisposable
                         }
                         ms.Position = 0;
 
-                        string baseName = "scan";
+                            string baseName = "scan";
                         string? configuredName = null;
                         if (selProfile?.AutoSaveSettings != null)
                         {
@@ -183,16 +194,91 @@ public class LocalScanServer : IDisposable
                         {
                             baseName = Path.GetFileNameWithoutExtension(configuredName);
                         }
-                        var suffix = groups.Count > 1 ? $"_{i + 1}" : "";
+                            var suffix = groups.Count > 1 ? $"_{i + 1}" : "";
                         var fileName = baseName + suffix + ".pdf";
-                        pdfStreams.Add((fileName, ms));
+                            pdfStreams.Add((fileName, ms));
                     }
                 }
                 finally
                 {
-                    foreach (var img in clonedImages)
+                        foreach (var img in clonedImages)
                     {
                         img.Dispose();
+                    }
+                }
+                }
+                else
+                {
+                    // Batch scan: Show BatchScanForm and, after it completes, return PDFs based on chosen output
+                    var startTimeUtc = DateTime.UtcNow.AddSeconds(-1);
+                    int initialCount = _imageList.Images.Count;
+                    Invoker.Current.Invoke(() => _desktopSubFormController.ShowBatchScanForm());
+
+                    var bs = _config.Get(c => c.BatchSettings);
+
+                    if (bs.OutputType == BatchOutputType.Load)
+                    {
+                        // Images were loaded into the app; collect delta and export
+                        var newUiImages = _imageList.Images.Skip(initialCount).ToList();
+                        var clones = newUiImages.Select(i => i.GetClonedImage()).ToList();
+                        if (clones.Count == 0)
+                        {
+                            res.StatusCode = 204;
+                            res.Close();
+                            return;
+                        }
+                        var groups = bs.SaveSeparator == SaveSeparator.None
+                            ? new List<List<ProcessedImage>> { clones }
+                            : SaveSeparatorHelper.SeparateScans(new[] { clones }, bs.SaveSeparator).ToList();
+                        var exporter = new PdfExporter(_scanningContext);
+                        pdfStreams = new List<(string fileName, MemoryStream stream)>();
+                        for (int i = 0; i < groups.Count; i++)
+                        {
+                            var ms = new MemoryStream();
+                            var ok = await exporter.Export(ms, groups[i]);
+                            if (!ok)
+                            {
+                                res.StatusCode = 500;
+                                res.Close();
+                                return;
+                            }
+                            ms.Position = 0;
+                            var baseName = Path.GetFileNameWithoutExtension(bs.SavePath) ?? "batch";
+                            var suffix = groups.Count > 1 ? $"_{i + 1}" : "";
+                            pdfStreams.Add((baseName + suffix + ".pdf", ms));
+                        }
+                        // Dispose clones after export
+                        foreach (var img in clones) img.Dispose();
+                    }
+                    else
+                    {
+                        // Files were saved to disk; collect the files created since start time and return them
+                        string expanded = Placeholders.NonNumeric.WithDate(DateTime.Now)
+                            .Substitute(bs.SavePath, incrementIfExists: false) ?? bs.SavePath!;
+                        var dir = Path.GetDirectoryName(expanded) ?? Environment.CurrentDirectory;
+                        var baseName = Path.GetFileNameWithoutExtension(expanded);
+                        var ext = Path.GetExtension(expanded);
+                        var candidates = Directory.Exists(dir)
+                            ? new DirectoryInfo(dir)
+                                .GetFiles("*" + ext)
+                                .Where(f => f.LastWriteTimeUtc >= startTimeUtc &&
+                                            f.Name.StartsWith(baseName, StringComparison.InvariantCultureIgnoreCase))
+                                .OrderBy(f => f.Name)
+                                .ToList()
+                            : new List<FileInfo>();
+                        if (candidates.Count == 0)
+                        {
+                            res.StatusCode = 204;
+                            res.Close();
+                            return;
+                        }
+                        pdfStreams = new List<(string fileName, MemoryStream stream)>();
+                        foreach (var fi in candidates)
+                        {
+                            var ms = new MemoryStream(await File.ReadAllBytesAsync(fi.FullName));
+                            ms.Position = 0;
+                            pdfStreams.Add((fi.Name, ms));
+                        }
                     }
                 }
 
