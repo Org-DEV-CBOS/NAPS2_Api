@@ -1,3 +1,13 @@
+# About this fork, NAPS2_Api
+We wanted to reuse the GUI and scanning capabilities of the original NAPS2 Application, Added to it the abililty to integrate with another system through an Api. hence the need for this fork.
+
+## Apis added:
+ - /scan?newProfile=false
+     Scans using the selected profile or opens the dialog to create a new profile then uses it to scan.
+ - /batch-scan
+     Opens up the batch diloag and scans according to the batch configuration.
+both return one or multiple pdf files/blobs
+
 # NAPS2 - Not Another PDF Scanner
 
 <p align="center">
