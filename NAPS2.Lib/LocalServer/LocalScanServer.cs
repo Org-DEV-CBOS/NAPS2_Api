@@ -243,7 +243,7 @@ public class LocalScanServer : IDisposable
                         }
                         var groups = bs.SaveSeparator == SaveSeparator.None
                             ? new List<List<ProcessedImage>> { clones }
-                            : SaveSeparatorHelper.SeparateScans(new[] { clones }, bs.SaveSeparator).ToList();
+                            : SaveSeparatorHelper.SeparateScans(new[] { clones }, bs.SaveSeparator, bs.SaveSeparatorPageCount).ToList();
                         var exporter = new PdfExporter(_scanningContext);
                         pdfStreams = new List<(string fileName, MemoryStream stream)>();
                         for (int i = 0; i < groups.Count; i++)

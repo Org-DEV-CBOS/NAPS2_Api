@@ -42,7 +42,10 @@ public class BatchScanForm : EtoDialogBase
     private readonly LayoutVisibility _multiVis = new(false);
     private readonly RadioButton _filePerScan;
     private readonly RadioButton _filePerPage;
+    private readonly RadioButton _filePerPageCount;
     private readonly RadioButton _separateByPatchT;
+    private readonly NumericMaskedTextBox<int> _pagesPerFile = new();
+    private readonly LayoutVisibility _pagesPerFileVis = new(false);
     private readonly LinkButton _moreInfo = C.UrlLink(PATCH_CODE_INFO_URL, UiStrings.MoreInfo);
     private readonly LayoutVisibility _fileVis = new(false);
     private readonly FilePathWithPlaceholders _filePath;
@@ -70,6 +73,7 @@ public class BatchScanForm : EtoDialogBase
         _saveToMultipleFiles = new RadioButton(_load) { Text = UiStrings.SaveToMultipleFiles };
         _filePerScan = new RadioButton { Text = UiStrings.OneFilePerScan };
         _filePerPage = new RadioButton(_filePerScan) { Text = UiStrings.OneFilePerPage };
+        _filePerPageCount = new RadioButton(_filePerScan) { Text = "Separate by number of pages" };
         _separateByPatchT = new RadioButton(_filePerScan) { Text = UiStrings.SeparateByPatchT };
         _filePath = new(this, dialogHelper);
         _profile.Format = x => x.DisplayName;
@@ -79,6 +83,10 @@ public class BatchScanForm : EtoDialogBase
         _multipleScansDelay.CheckedChanged += UpdateVisibility;
         _saveToSingleFile.CheckedChanged += UpdateVisibility;
         _saveToMultipleFiles.CheckedChanged += UpdateVisibility;
+        _filePerScan.CheckedChanged += UpdateVisibility;
+        _filePerPage.CheckedChanged += UpdateVisibility;
+        _filePerPageCount.CheckedChanged += UpdateVisibility;
+        _separateByPatchT.CheckedChanged += UpdateVisibility;
 
         _userTransact = Config.User.BeginTransaction();
         _transactionConfig = Config.WithTransaction(_userTransact);
@@ -100,6 +108,7 @@ public class BatchScanForm : EtoDialogBase
         _delayVis.IsVisible = _multipleScansDelay.Checked;
         _multiVis.IsVisible = _saveToMultipleFiles.Checked;
         _fileVis.IsVisible = _saveToSingleFile.Checked || _saveToMultipleFiles.Checked;
+        _pagesPerFileVis.IsVisible = _filePerPageCount.Checked;
         LayoutController.Invalidate();
     }
 
@@ -155,6 +164,11 @@ public class BatchScanForm : EtoDialogBase
                     L.Column(
                         _filePerScan,
                         _filePerPage,
+                        _filePerPageCount,
+                        L.Row(
+                            C.Label("Pages per file"),
+                            _pagesPerFile.Width(50)
+                        ).Visible(_pagesPerFileVis),
                         _separateByPatchT,
                         _moreInfo
                     ).Padding(left: 20).Visible(_multiVis),
@@ -190,9 +204,19 @@ public class BatchScanForm : EtoDialogBase
         _saveToMultipleFiles.Checked =
             _transactionConfig.Get(c => c.BatchSettings.OutputType) == BatchOutputType.MultipleFiles;
 
-        _filePerScan.Checked = _transactionConfig.Get(c => c.BatchSettings.SaveSeparator) == SaveSeparator.FilePerScan;
-        _filePerPage.Checked = _transactionConfig.Get(c => c.BatchSettings.SaveSeparator) == SaveSeparator.FilePerPage;
-        _separateByPatchT.Checked = _transactionConfig.Get(c => c.BatchSettings.SaveSeparator) == SaveSeparator.PatchT;
+        var sep = _transactionConfig.Get(c => c.BatchSettings.SaveSeparator);
+        var pagesPerFile = _transactionConfig.Get(c => c.BatchSettings.SaveSeparatorPageCount);
+        if (pagesPerFile <= 0)
+        {
+            pagesPerFile = 1;
+        }
+
+        _filePerScan.Checked = sep == SaveSeparator.FilePerScan;
+        _filePerPage.Checked = sep == SaveSeparator.FilePerPage && pagesPerFile <= 1;
+        _filePerPageCount.Checked = sep == SaveSeparator.FilePerPage && pagesPerFile > 1;
+        _separateByPatchT.Checked = sep == SaveSeparator.PatchT;
+        _pagesPerFile.Text = pagesPerFile.ToString(CultureInfo.CurrentCulture);
+        _pagesPerFileVis.IsVisible = _filePerPageCount.Checked;
 
         _filePath.Text = _transactionConfig.Get(c => c.BatchSettings.SavePath);
     }
@@ -237,9 +261,22 @@ public class BatchScanForm : EtoDialogBase
             : _saveToMultipleFiles.Checked ? BatchOutputType.MultipleFiles
             : BatchOutputType.Load);
 
+        int pagesPerFile = 1;
+        if (_filePerPageCount.Checked)
+        {
+            if (!int.TryParse(_pagesPerFile.Text, out pagesPerFile) || pagesPerFile <= 0)
+            {
+                ok = false;
+                pagesPerFile = 1;
+                _pagesPerFile.Focus();
+            }
+        }
+
         _userTransact.Set(c => c.BatchSettings.SaveSeparator, _filePerScan.Checked ? SaveSeparator.FilePerScan
             : _separateByPatchT.Checked ? SaveSeparator.PatchT
             : SaveSeparator.FilePerPage);
+
+        _userTransact.Set(c => c.BatchSettings.SaveSeparatorPageCount, _filePerPageCount.Checked ? pagesPerFile : 1);
 
         _userTransact.Set(c => c.BatchSettings.SavePath, _filePath.Text);
         if (_transactionConfig.Get(c => c.BatchSettings.OutputType) != BatchOutputType.Load &&
@@ -332,7 +369,7 @@ public class BatchScanForm : EtoDialogBase
         {
             _profile.AsControl(), _singleScan, _multipleScansPrompt, _multipleScansDelay, _numberOfScans,
             _timeBetweenScans, _load, _saveToSingleFile, _saveToMultipleFiles, _filePerScan, _filePerPage,
-            _separateByPatchT, _moreInfo
+            _filePerPageCount, _separateByPatchT, _pagesPerFile, _moreInfo
         };
         foreach (var control in controls)
         {

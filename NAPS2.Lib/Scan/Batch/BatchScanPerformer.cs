@@ -1,4 +1,4 @@
-﻿using System.Threading;
+using System.Threading;
 using Eto.Forms;
 using NAPS2.EtoForms;
 using NAPS2.EtoForms.Ui;
@@ -249,7 +249,7 @@ public class BatchScanPerformer : IBatchScanPerformer
             else if (_settings.OutputType == BatchOutputType.MultipleFiles)
             {
                 int i = 0;
-                foreach (var imageList in SaveSeparatorHelper.SeparateScans(_scans, _settings.SaveSeparator))
+                foreach (var imageList in SaveSeparatorHelper.SeparateScans(_scans, _settings.SaveSeparator, _settings.SaveSeparatorPageCount))
                 {
                     await Save(placeholders, i++, imageList);
                     foreach (var img in imageList)
