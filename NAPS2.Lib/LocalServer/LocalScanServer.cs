@@ -78,6 +78,18 @@ public class LocalScanServer : IDisposable
             var req = context.Request;
             var res = context.Response;
 
+            // Allow browser-based clients to call the local API from another origin.
+            res.Headers["Access-Control-Allow-Origin"] = "*";
+            res.Headers["Access-Control-Allow-Methods"] = "GET, OPTIONS";
+            res.Headers["Access-Control-Allow-Headers"] = "Content-Type, Authorization";
+
+            if (req.HttpMethod == "OPTIONS")
+            {
+                res.StatusCode = 204;
+                res.Close();
+                return;
+            }
+
             if (req.HttpMethod != "GET")
             {
                 res.StatusCode = 405;
